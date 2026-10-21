@@ -1,0 +1,259 @@
+import React, { useEffect, useRef, useState } from "react";
+import { useMsal } from "@azure/msal-react";
+import { loginRequest } from "../../../authConfig";
+import { callMsGraph } from "../../../graph";
+import { useNavigate } from "react-router-dom";
+import { useDispatch } from "react-redux";
+import { setUser } from "../../../store/reducer/authSlice";
+import useApi from "../../../Hooks/useApi";
+import { addNavigationItems } from "../../../store/reducer/navigationSlice";
+import { setUserRoleName, setDepartmentName } from "../../../store/reducer/userSlice";
+import Loading from "../../../components/Loading/Loading";
+import { setIdToken } from "../../../store/reducer/tokenSlice";
+import CryptoJS from 'crypto-js';
+import { toast } from "react-toastify";
+
+function storePathsInLocalStorage(menu) {
+
+  const paths = menu.reduce((acc, item) => {
+    if (item.path) acc.push(item.path);
+
+    if (item.subItems) {
+      const subPaths = item.subItems.map(subItem => subItem.path);
+      acc.push(...subPaths);
+    }
+
+    return acc;
+  }, []);
+  localStorage.setItem("menuPaths", JSON.stringify(paths));
+}
+
+export function LoginForm() {
+  const navigate = useNavigate()
+  const dispatch = useDispatch()
+
+  const { instance, accounts } = useMsal();
+  const { apiCall } = useApi();
+  const localLoginButtonRef = useRef(null);
+  const [localButton, setLocalButton] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const [dummyEmails, setDummyEmails] = useState([]);
+
+  useEffect(() => {
+    const fetchDummyEmails = async () => {
+      try {
+        const response = await apiCall(
+          `${process.env.REACT_APP_CONTACTS}`,
+          "GET"
+        );
+        if (response) {
+          setDummyEmails(response);
+        } else {
+          console.error("Failed to fetch dummy emails:", response.message);
+        }
+      } catch (error) {
+        console.error("Error fetching dummy emails:", error);
+      }
+    };
+
+    if (localButton) {
+      fetchDummyEmails();
+    }
+
+  }, [apiCall, localButton]);
+
+
+  const [showLocalAccounts, setShowLocalAccounts] = useState(false);
+
+  const selectLocalAccount = async (user) => {
+    const selectedUser = {
+      "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users/$entity",
+      "businessPhones": [],
+      "displayName": user.name,
+      "givenName": null,
+      "jobTitle": null,
+      "mail": user.mail,
+      "mobilePhone": null,
+      "officeLocation": null,
+      "preferredLanguage": "en-US",
+      "surname": null,
+      "userPrincipalName": user.mail,
+      "id": "35ab16c3-9baa-4e37-b314-50e1847d5cad", // Fetch actual user ID dynamically
+    };
+    dispatch(setUser(selectedUser));
+    const menusFetched = await getUserMenus(user.mail);
+    if (!menusFetched) {
+      setLoading(false);
+      return
+    };
+    navigate('/pettyCashDashboard');
+  };
+
+
+  const handleLogin = () => {
+    instance.loginRedirect({
+      ...loginRequest,
+      prompt: "select_account",
+    }).catch(e => {
+      console.log(e);
+    });
+  };
+
+  const handleLocalLogin = () => {
+    setShowLocalAccounts(true);
+  };
+
+
+  useEffect(() => {
+    const handleLoginAndMenuFetch = async () => {
+      if (instance && accounts.length > 0) {
+        setLoading(true);
+        try {
+          const tokenResponse = await instance.acquireTokenSilent({
+            ...loginRequest,
+            account: accounts[0],
+          });
+          const secretKey = process.env.REACT_APP_SECRET_TOKEN;
+
+          const token = CryptoJS.AES.encrypt(tokenResponse.idToken, secretKey).toString();
+          dispatch(setIdToken(tokenResponse.idToken));
+
+          const userInfo = await callMsGraph(tokenResponse.accessToken);
+          dispatch(setUser(userInfo));
+
+          const menusFetched = await getUserMenus(userInfo.mail, token);
+          if (!menusFetched) {
+            setLoading(false);
+            return;
+          }
+
+          navigate('/pettyCashDashboard');
+        } catch (error) {
+          console.error("Login or token acquisition failed: ", error);
+          setLoading(false);
+        }
+      }
+    };
+
+    handleLoginAndMenuFetch();
+  }, [instance, accounts, dispatch, navigate]);
+
+  const getUserMenus = async (mail, token) => {
+    try {
+      const requestBody = {
+        emailId: mail,
+        apiType: "PettyCash"
+      };
+
+      const response = await apiCall(
+        `${process.env.REACT_APP_USER_URL}/menus`,
+        "POST",
+        requestBody,
+        token
+      );
+      if (response.success === true && response.data) {
+        dispatch(addNavigationItems(response.data));
+        storePathsInLocalStorage(response.data);
+        const roleName = response.data[0].lngName;
+        const department = response.data[0].departmentName;
+        dispatch(setUserRoleName(roleName));
+        dispatch(setDepartmentName(department));
+        return true;
+      } else {
+        toast.error("No Screens have been mapped to your account.", { autoClose: 4000 });
+        return false;
+      }
+    } catch (error) {
+      console.log("Error fetching user menus:", error);
+    }
+  }
+
+  useEffect(() => {
+    if (window.location.origin === "https://pettycash.mindcraft.in" || window.location.origin === "https://pettycashuat.kotakmf")  {
+      setLocalButton(true);
+    }
+
+    window.showLocalLogin = () => setLocalButton(true);
+  }, []);
+
+
+  return (
+    <div
+      className="flex flex-col max-w-full w-[360px]"
+    >
+      {showLocalAccounts ? (
+        <>
+          <div className="bg-white shadow-md p-4 rounded-lg">
+            <button onClick={() => setShowLocalAccounts(false)} className="text-sky-900 mb-3">← Back</button>
+            <h2 className="text-xl font-semibold mb-2">Pick an Account</h2>
+            <ul className="border rounded-md">
+              {dummyEmails.map((user, index) => (
+                <li
+                  key={index}
+                  className="p-3 border-b last:border-none cursor-pointer hover:bg-gray-100"
+                  onClick={() => selectLocalAccount(user)}
+                >
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 bg-gray-300 rounded-full flex items-center justify-center text-sm font-bold">
+                      {user.name.charAt(0)}
+                    </div>
+                    <div>
+                      <p className="font-medium">{user.name}</p>
+                      <p className="text-sm text-gray-600">{user.mail}</p>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+        </>
+      ) : (
+        <>
+          <div className="flex flex-col w-full">
+            <h1 className="text-4xl font-semibold tracking-tighter leading-none text-gray-900">
+              Log in
+            </h1>
+            <p className="mt-3 text-base tracking-tight text-gray-600">
+              Welcome back! Please enter your details.
+            </p>
+          </div>
+          <div className="flex flex-col mt-8 w-full rounded-xl">
+            <div className="flex flex-col w-full text-sm gap-2">
+              <button
+                onClick={handleLogin}
+                className="overflow-hidden gap-2 self-stretch px-3 py-2.5 w-full text-center text-white bg-sky-900 rounded"
+              >
+                Sign in using Microsoft Account
+              </button>
+              {localButton && (
+                <button
+                  ref={localLoginButtonRef}
+                  onClick={handleLocalLogin}
+                  className="overflow-hidden gap-2 self-stretch px-3 py-2.5 w-full text-center text-white bg-sky-900 rounded"
+                >
+                  Sign in using Local Account
+                </button>
+              )}
+              {/* <div className="flex gap-1 justify-center items-start mt-3 w-full leading-none">
+            <span className="text-gray-600">Don't have an account?</span>
+            <button type="button" className="font-semibold text-sky-900">
+              Sign up
+            </button>
+          </div> */}
+            </div>
+          </div>
+        </>
+      )}
+
+
+      {loading && (
+        <div className="fixed inset-0 flex justify-center items-center bg-white bg-opacity-100 z-50">
+          <Loading />
+        </div>
+      )}
+
+    </div>
+  );
+}
